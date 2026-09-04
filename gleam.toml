@@ -1,0 +1,17 @@
+name = "spindle"
+version = "0.1.0"
+description = "Local embeddings for Gleam through an owned llama.cpp helper."
+licences = ["Apache-2.0"]
+target = "erlang"
+gleam = ">= 1.18.0"
+repository = { type = "github", user = "Roasbeef", repo = "spindle" }
+internal_modules = ["spindle/internal/*"]
+
+[dependencies]
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+gleam_erlang = ">= 1.0.0 and < 2.0.0"
+gleam_otp = ">= 1.3.0 and < 2.0.0"
+weft = ">= 0.4.2 and < 1.0.0"
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"
