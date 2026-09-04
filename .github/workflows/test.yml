@@ -1,0 +1,40 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          otp-version: '29.0.5'
+          gleam-version: '1.18.1'
+          rebar3-version: '3.27.0'
+      - run: gleam deps download
+      - run: gleam format --check
+      - run: gleam build --warnings-as-errors
+      - run: gleam test
+      - name: Build pinned native helper
+        run: |
+          cmake -S native -B native/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build native/build --target spindle-helper --parallel 4
+      - name: Native startup error is explicit
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          p = subprocess.run(['native/build/spindle-helper'], capture_output=True, timeout=5)
+          assert p.returncode == 64, p
+          assert b'usage:' in p.stderr, p
+          PY
