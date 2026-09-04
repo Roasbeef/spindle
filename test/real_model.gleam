@@ -1,8 +1,10 @@
 //// Explicit integration executable. Missing model configuration is an error.
 
+import gleam/erlang/process
 import gleam/io
 import gleam/list
 import spindle
+import weft/poll
 
 @external(erlang, "spindle_test_ffi", "env")
 fn env(name: String) -> Result(String, Nil)
@@ -30,5 +32,27 @@ pub fn main() {
     as "model reloads"
   assert spindle.embed(restarted, texts, 30_000) == Ok(vectors)
   assert spindle.stop(restarted, 5000) == Ok(Nil)
-  io.println("Real-model embedding, repeatability, stop, and restart passed.")
+  // The real native reader must handle owner loss without a Gleam shutdown
+  // callback. This proves EOF teardown with a loaded model after hard kill.
+  let assert Ok(abandoned) = spindle.start(helper, model, 60_000)
+    as "model loads for owner-loss test"
+  let pid = spindle.helper_pid(abandoned)
+  let assert Ok(owner) = helper_owner(pid) as "locate native Port owner"
+  process.kill(owner)
+  assert poll.until(within: 5000, every: 10, attempt: fn() {
+      case alive(pid) {
+        True -> poll.Retry
+        False -> poll.Done(Nil)
+      }
+    })
+    == poll.Answered(Nil)
+  io.println(
+    "Real-model embedding, repeatability, stop, restart, and owner kill passed.",
+  )
 }
+
+@external(erlang, "spindle_test_ffi", "helper_owner")
+fn helper_owner(pid: Int) -> Result(process.Pid, Nil)
+
+@external(erlang, "spindle_test_ffi", "alive")
+fn alive(pid: Int) -> Bool
