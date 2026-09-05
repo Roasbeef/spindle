@@ -5,8 +5,10 @@ inference outside the BEAM VM. Use weft for actor and lifecycle machinery.
 Keep FFI confined to src/spindle/internal and its small Erlang shim.
 
 Use total decoders, explicit errors, bounded wire frames, and typed domain
-states. No panics in library code. Document public APIs and subtle ownership
-transitions with complete sentences. Preserve user changes. Commits use
+states. No panics in library code. Document public and private functions and types in the literate style:
+explain ownership, ordering, invariants, and failure behavior, rather than
+narrating syntax. Separate logical steps with explanatory comments and
+blank lines. Use complete sentences. Preserve user changes. Commits use
 Olaoluwa Osuntokun <laolu32@gmail.com> without attribution footers.
 
 Run Gleam format, warning-free build, tests, native tests, and applicable

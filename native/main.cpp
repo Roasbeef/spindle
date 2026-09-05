@@ -22,15 +22,21 @@ constexpr uint32_t max_batch = 16;
 constexpr uint32_t max_text = 65536;
 constexpr uint32_t context_limit = 2048;
 
+// Reader owns a cursor into one bounded frame. Length checks precede string
+// construction, so malformed input cannot allocate from an unchecked length.
 struct Reader {
     const Bytes & bytes;
     size_t pos = 0;
+
+    // u32 advances the cursor only when a complete integer remains.
     uint32_t u32() {
         if (bytes.size() - pos < 4) throw std::runtime_error("truncated integer");
         uint32_t value = 0;
         for (int i = 0; i < 4; ++i) value = (value << 8) | bytes[pos++];
         return value;
     }
+
+    // text validates both the per-input limit and the remaining frame.
     std::string text() {
         const uint32_t size = u32();
         if (size > max_text || size > bytes.size() - pos)
@@ -39,15 +45,20 @@ struct Reader {
         pos += size;
         return value;
     }
+
+    // end rejects trailing data instead of accepting a valid prefix.
     void end() {
         if (pos != bytes.size()) throw std::runtime_error("trailing request bytes");
     }
 };
 
+// u32 emits the protocol byte order independently of host endianness.
 void u32(Bytes & out, uint32_t value) {
     for (int shift = 24; shift >= 0; shift -= 8) out.push_back(value >> shift);
 }
 
+// write_all handles short writes without allowing a partial frame to become
+// a successful response. A broken output channel ends the helper.
 void write_all(const uint8_t * bytes, size_t size) {
     while (size > 0) {
         const auto written = std::fwrite(bytes, 1, size, stdout);
@@ -57,6 +68,8 @@ void write_all(const uint8_t * bytes, size_t size) {
     }
 }
 
+// send publishes one complete bounded response. Only the inference thread
+// writes stdout; diagnostics stay on stderr and cannot corrupt framing.
 void send(const Bytes & body) {
     if (body.empty() || body.size() > max_frame) std::_Exit(70);
     Bytes header;
@@ -66,6 +79,8 @@ void send(const Bytes & body) {
     if (std::fflush(stdout)) std::_Exit(74);
 }
 
+// failure reports one terminal request error, with no partial vector batch.
+// The text bound also applies to exception messages from the native runtime.
 void failure(uint32_t id, const std::string & message) {
     Bytes response{255};
     u32(response, id);
@@ -75,6 +90,8 @@ void failure(uint32_t id, const std::string & message) {
     send(response);
 }
 
+// Inbox transfers one pending frame from the stdin reader to model execution.
+// Shutdown bypasses this slot, so a busy model cannot delay owner teardown.
 struct Inbox {
     std::mutex mutex;
     std::condition_variable ready;
@@ -92,6 +109,9 @@ void read_all(uint8_t * bytes, size_t size) {
     }
 }
 
+// receive is the independent cancellation path. It reads bounded frames while
+// the main thread loads or evaluates the model, and terminates the entire
+// process on shutdown or EOF rather than waiting for model cooperation.
 void receive(const std::shared_ptr<Inbox> & inbox) {
     for (;;) {
         Bytes header(4);
@@ -111,6 +131,8 @@ void receive(const std::shared_ptr<Inbox> & inbox) {
     }
 }
 
+// Engine owns the llama.cpp model and context on the inference thread. Normal
+// exception unwinding releases both; immediate shutdown uses OS reclamation.
 struct Engine {
     llama_model * model = nullptr;
     llama_context * context = nullptr;
@@ -120,6 +142,8 @@ struct Engine {
     }
 };
 
+// tokenize counts before allocating token storage and refuses truncation.
+// Counting and embedding share this function, including special-token policy.
 std::vector<llama_token> tokenize(const llama_vocab * vocab, const std::string & text) {
     // Both operations use identical special-token handling. User text is
     // ordinary text; strings resembling control tokens are not interpreted.
@@ -136,6 +160,9 @@ std::vector<llama_token> tokenize(const llama_vocab * vocab, const std::string &
     return tokens;
 }
 
+// embed clears prior sequence state before each input and normalizes the
+// selected pooled output. The returned vector cannot depend on a previous
+// batch through retained KV state.
 std::vector<float> embed(Engine & engine, const std::vector<llama_token> & tokens, uint32_t dims) {
     const auto memory = llama_get_memory(engine.context);
     if (memory) llama_memory_clear(memory, true);
@@ -167,6 +194,8 @@ std::vector<float> embed(Engine & engine, const std::vector<llama_token> & token
     return normalized;
 }
 
+// serve validates every input before performing any inference. Responses are
+// assembled privately and sent only after the entire operation succeeds.
 void serve(const Bytes & request, Engine & engine, uint32_t dims) {
     Reader reader{request};
     const auto command = request[reader.pos++];
@@ -202,6 +231,9 @@ void serve(const Bytes & request, Engine & engine, uint32_t dims) {
     }
 }
 
+// main starts the cancellation reader before any model work, then retains one
+// loaded model across sequential requests. The greeting publishes its bounds
+// only after context construction and pooling validation succeed.
 int main(int argc, char ** argv) {
     if (argc != 2) {
         std::fprintf(stderr, "usage: spindle-helper MODEL.gguf\n");

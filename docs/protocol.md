@@ -44,16 +44,18 @@ owner is gone and also exits the process. This is necessary during model
 load and GPU work, where an inference abort callback alone is insufficient.
 Native exit reclaims the model and inference threads through the OS.
 
-The Gleam API restricts an engine to its creating process. A weft actor
+The Gleam API restricts an engine to its creating process. A weft state machine
 owns its Port and monitors that creator. Creator death requests native
-shutdown; actor death closes stdin, which the native reader treats as
+shutdown; machine death closes stdin, which the native reader treats as
 owner loss. A normal `stop` waits for the Port's OS exit-status message.
 
 Request timeout triggers engine shutdown and allows up to five additional
 seconds to observe native exit. `TimedOut` means exit was observed;
-`DrainUnconfirmed` means it was not. `Unavailable` means the actor died
+`DrainUnconfirmed` means it was not. `Unavailable` means the machine died
 and does not assert native drain. An engine cannot be reused after a
-timeout. Callers create a replacement explicitly. Confirmed teardown
+timeout. The machine also bounds draining to five seconds, then reports
+unconfirmed teardown, closes the Port, and stops. Late stdout and repeated
+stop requests cannot extend that deadline. Callers create a replacement explicitly. Confirmed teardown
 consumes the original request's terminal reply before returning. After
 `DrainUnconfirmed`, a late reply can remain in the creator's mailbox until
 that process exits; bounded late-reply disposal is a follow-up before

@@ -1,3 +1,5 @@
+%% This module exposes Port primitives only. The Gleam state machine owns
+%% admission, response validation, deadlines, and acknowledgement ordering.
 -module(spindle_port).
 -export([open/2, send/2, close/1, event/1]).
 
@@ -22,10 +24,13 @@ send(Port, Bytes) ->
     catch error:badarg -> {error, <<"native port is closed">>}
     end.
 
+%% close requests EOF teardown. It cannot establish that the OS process has
+%% exited; only a selected exit_status event supplies that evidence.
 close(Port) ->
     try erlang:port_close(Port) catch error:badarg -> ok end,
     nil.
 
+%% event is a total decoder after the selector has matched the owned Port.
 event({_Port, {data, Bytes}}) when is_binary(Bytes) -> {bytes, Bytes};
 event({_Port, {exit_status, Status}}) when is_integer(Status) -> {exited, Status};
 event(_) -> invalid.

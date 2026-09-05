@@ -83,10 +83,12 @@ pub fn shutdown() -> BitArray {
   frame(<<3:8, 0:32>>)
 }
 
+/// frame adds the wire header after the caller has bounded the payload.
 fn frame(body: BitArray) -> BitArray {
   <<bit_array.byte_size(body):32, body:bits>>
 }
 
+/// valid converts a checked wire invariant into the decoder error chain.
 fn valid(condition: Bool, reason: String) -> Result(Nil, String) {
   case condition {
     True -> Ok(Nil)
@@ -110,6 +112,8 @@ pub fn feed(
     bit_array.byte_size(buffer) + bit_array.byte_size(bytes) <= max_frame + 4,
     "response exceeds frame limit",
   ))
+  // Check the combined bound before concatenation. A fragmented body must
+  // not turn several individually bounded chunks into an unbounded buffer.
   let combined = <<buffer:bits, bytes:bits>>
   case combined {
     <<size:32, body:bits>> -> {
@@ -147,6 +151,8 @@ pub fn decode(body: BitArray) -> Result(Response, String) {
         bit_array.byte_size(rest) == count * dimensions * 4,
         "vector payload length mismatch",
       ))
+      // Exact byte length makes the recursive decode consume the whole
+      // batch; trailing or missing vector components cannot be ignored.
       use values <- result.try(vectors(rest, count, dimensions, []))
       Ok(Vectors(id, dimensions, values))
     }
@@ -168,6 +174,8 @@ pub fn decode(body: BitArray) -> Result(Response, String) {
   }
 }
 
+/// counts walks an already size-checked payload. Each count must fit the
+/// same context limit enforced by native tokenization.
 fn counts(bytes: BitArray, acc: List(Int)) -> Result(List(Int), String) {
   case bytes {
     <<>> -> Ok(list.reverse(acc))
@@ -177,6 +185,8 @@ fn counts(bytes: BitArray, acc: List(Int)) -> Result(List(Int), String) {
   }
 }
 
+/// vectors consumes exactly the declared batch shape. The reversed
+/// accumulator preserves request order without repeated list appends.
 fn vectors(
   bytes: BitArray,
   remaining: Int,
@@ -193,6 +203,9 @@ fn vectors(
   }
 }
 
+/// floats decodes one vector while accumulating its squared norm. Invalid
+/// IEEE encodings fail the float pattern; a finite but zero or non-unit vector
+/// fails the terminal norm check before any vector is returned.
 fn floats(
   bytes: BitArray,
   remaining: Int,

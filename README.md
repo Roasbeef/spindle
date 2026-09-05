@@ -3,7 +3,7 @@
 Local embeddings for Gleam, with model inference in an owned native
 process. A small C++ helper links against pinned llama.cpp and keeps its
 model loaded across requests. The Gleam package communicates over a BEAM
-Port, with a weft actor owning the helper's lifecycle.
+Port, with a weft state machine owning the helper's lifecycle.
 
 Spindle owns embedding requests and helper lifetime. Applications own text
 extraction, indexing, and retrieval policy. The initial consumer is
@@ -53,7 +53,7 @@ An engine belongs to the process that created it. Moving it to another
 process returns `WrongOwner`. One request is in flight; vectors preserve
 input order. A timeout shuts down the engine and reports whether its
 native exit was observed. Start a replacement explicitly after timeout.
-`stop` can report `Unavailable` if a prior failure already ended the actor.
+`stop` can report `Unavailable` if a prior failure already ended the machine.
 
 ## Real-model verification
 
@@ -75,5 +75,6 @@ repeatability, stop, and restart. Native tests exercise input limits,
 framing, EOF shutdown, and cancellation around startup and a large batch.
 These checks establish an execution path, not retrieval quality.
 
-See [the protocol](docs/protocol.md) for bounds and ownership details, and
+See [the architecture](docs/architecture.md) for ownership and lifecycle
+transitions, [the protocol](docs/protocol.md) for bounds and ownership details, and
 [the implementation plan](docs/next.md) for remaining work.

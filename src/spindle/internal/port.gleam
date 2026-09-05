@@ -7,8 +7,10 @@ import gleam/erlang/port.{type Port}
 pub type Event {
   /// Protocol stdout bytes.
   Bytes(BitArray)
+
   /// Observed OS process exit status.
   Exited(Int)
+
   /// An unexpected port message.
   Invalid
 }
