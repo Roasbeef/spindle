@@ -1,19 +1,19 @@
 # Spindle
 
-Local embeddings for Gleam, with model inference in an owned native
-process. A small C++ helper links against pinned llama.cpp and keeps its
-model loaded across requests. The Gleam package communicates over a BEAM
-Port, with a weft state machine owning the helper's lifecycle.
+Local embeddings for Gleam, with model inference in an owned native process.
+A small C++ helper links against pinned llama.cpp and keeps its model loaded
+across requests. The Gleam package communicates over a BEAM Port, with a
+weft state machine owning the helper's lifecycle.
 
 Spindle owns embedding requests and helper lifetime. Applications own text
 extraction, indexing, and retrieval policy. The initial consumer is
-[Loom](https://github.com/Roasbeef/loom); its
-[tracking issue](https://github.com/Roasbeef/loom/issues/226) records the
-larger vector-retrieval project.
+[Loom](https://github.com/Roasbeef/loom); its [tracking
+issue](https://github.com/Roasbeef/loom/issues/226) records the larger
+vector-retrieval project.
 
 **Status: initial implementation, not yet published to Hex.** The current
-runtime is CPU-only. It has been exercised locally with EmbeddingGemma
-300M Q8_0; model profiles and release packaging are still in progress.
+runtime is CPU-only. It has been exercised locally with EmbeddingGemma 300M
+Q8_0; model profiles and release packaging are still in progress.
 
 ## Build
 
@@ -58,8 +58,8 @@ native exit was observed. Start a replacement explicitly after timeout.
 ## Real-model verification
 
 The ordinary suite uses a deterministic native-protocol fixture. The
-explicit integration commands require a model; missing configuration is
-an error rather than a skipped test.
+explicit integration commands require a model; missing configuration is an
+error rather than a skipped test.
 
 ```sh
 export SPINDLE_HELPER="$PWD/native/build/spindle-helper"
@@ -75,6 +75,7 @@ repeatability, stop, and restart. Native tests exercise input limits,
 framing, EOF shutdown, and cancellation around startup and a large batch.
 These checks establish an execution path, not retrieval quality.
 
-See [the architecture](docs/architecture.md) for ownership and lifecycle
-transitions, [the protocol](docs/protocol.md) for bounds and ownership details, and
-[the implementation plan](docs/next.md) for remaining work.
+See [the architecture](docs/architecture.md) for the source reading path,
+Gleam idioms, ownership, and lifecycle transitions, [the
+protocol](docs/protocol.md) for bounds and ownership details, and [the
+implementation plan](docs/next.md) for remaining work.
