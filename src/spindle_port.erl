@@ -1,5 +1,11 @@
 %% This module exposes Port primitives only. The Gleam state machine owns
 %% admission, response validation, deadlines, and acknowledgement ordering.
+%%
+%% Flow: open/2 executes inside the machine initialiser and publishes the
+%% owned Port plus OS PID. send/2 reports backpressure instead of suspending
+%% that machine. Its selector matches the Port identity before event/1
+%% decodes stdout or exit status. close/1 requests EOF teardown; event/1's
+%% exit-status result is the separate observation required for native drain.
 -module(spindle_port).
 -export([open/2, send/2, close/1, event/1]).
 

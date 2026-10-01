@@ -1,6 +1,19 @@
 // Spindle keeps llama.cpp in an external process. The reader remains live
 // during model load and inference, so stdin EOF or shutdown ends all native
-// work immediately. The owner observes process exit before reporting drain.
+// work when the reader receives a complete shutdown frame or detects EOF.
+// The BEAM owner observes process exit before reporting confirmed drain.
+//
+// Flow: main starts receive before model loading, constructs Engine, and sends
+// the validated greeting. receive bounds frames before allocating their bodies
+// and transfers one pending request through Inbox. main moves that request out
+// under the mutex and calls serve after releasing the lock. serve validates
+// every text through tokenize before embed evaluates inputs sequentially.
+// send publishes one complete response; failure publishes one terminal error.
+//
+// receive handles shutdown and owner loss independently of that request path.
+// It calls _Exit, so the OS reclaims model memory and threads even while main
+// is loading, evaluating, or writing stdout. Port closure requests this path;
+// only the BEAM exit-status message confirms it ran to native process exit.
 #include "llama.h"
 #include <algorithm>
 #include <cmath>
@@ -25,7 +38,10 @@ constexpr uint32_t context_limit = 2048;
 // Reader owns a cursor into one bounded frame. Length checks precede string
 // construction, so malformed input cannot allocate from an unchecked length.
 struct Reader {
+    // The caller retains the complete frame for this reader's lifetime.
     const Bytes & bytes;
+
+    // Every successful read advances within bytes; no unchecked offset escapes.
     size_t pos = 0;
 
     // u32 advances the cursor only when a complete integer remains.
@@ -49,6 +65,37 @@ struct Reader {
     // end rejects trailing data instead of accepting a valid prefix.
     void end() {
         if (pos != bytes.size()) throw std::runtime_error("trailing request bytes");
+    }
+};
+
+// Inbox transfers one pending frame from the stdin reader to model execution.
+// Shutdown bypasses this slot, so a busy model cannot delay owner teardown.
+struct Inbox {
+    // Protects pending during the reader-to-main ownership transfer.
+    std::mutex mutex;
+
+    // Wakes main only after pending contains a complete bounded frame.
+    std::condition_variable ready;
+
+    // Empty means no queued work. There can be one active request in main and
+    // one pending frame here; public Gleam calls never pipeline requests.
+    Bytes pending;
+};
+
+// Engine owns the llama.cpp model and context on the inference thread. Normal
+// exception unwinding releases both; immediate shutdown uses OS reclamation.
+struct Engine {
+    // Loading installs the model before a context can refer to it.
+    llama_model * model = nullptr;
+
+    // Main alone creates, evaluates, and frees this context.
+    llama_context * context = nullptr;
+
+    // Free the context before the model it references on ordinary unwinding.
+    // _Exit deliberately bypasses destructors and relies on OS reclamation.
+    ~Engine() {
+        if (context) llama_free(context);
+        if (model) llama_model_free(model);
     }
 };
 
@@ -90,14 +137,6 @@ void failure(uint32_t id, const std::string & message) {
     send(response);
 }
 
-// Inbox transfers one pending frame from the stdin reader to model execution.
-// Shutdown bypasses this slot, so a busy model cannot delay owner teardown.
-struct Inbox {
-    std::mutex mutex;
-    std::condition_variable ready;
-    Bytes pending;
-};
-
 // EOF is loss of the owner. Do not wait for a model callback, which may
 // not be invoked during GPU execution or model loading.
 void read_all(uint8_t * bytes, size_t size) {
@@ -124,23 +163,15 @@ void receive(const std::shared_ptr<Inbox> & inbox) {
 
         // Shutdown has no model dependency and bypasses the work queue.
         if (body[0] == 3 && body.size() == 5) std::_Exit(0);
+
+        // Publication transfers the frame, not model custody. A second queued
+        // frame is a protocol violation, so there is no growing native queue.
         std::lock_guard<std::mutex> lock(inbox->mutex);
         if (!inbox->pending.empty()) std::_Exit(65);
         inbox->pending = std::move(body);
         inbox->ready.notify_one();
     }
 }
-
-// Engine owns the llama.cpp model and context on the inference thread. Normal
-// exception unwinding releases both; immediate shutdown uses OS reclamation.
-struct Engine {
-    llama_model * model = nullptr;
-    llama_context * context = nullptr;
-    ~Engine() {
-        if (context) llama_free(context);
-        if (model) llama_model_free(model);
-    }
-};
 
 // tokenize counts before allocating token storage and refuses truncation.
 // Counting and embedding share this function, including special-token policy.
@@ -154,6 +185,8 @@ std::vector<llama_token> tokenize(const llama_vocab * vocab, const std::string &
     if (count == 0 || count > static_cast<int32_t>(context_limit))
         throw std::runtime_error("input exceeds the token limit or is empty");
     std::vector<llama_token> tokens(count);
+
+    // The size-only pass bounded storage before the second pass fills it.
     const int32_t actual = llama_tokenize(vocab, text.data(), static_cast<int32_t>(text.size()),
                                          tokens.data(), count, true, false);
     if (actual != count) throw std::runtime_error("tokenizer length changed");
@@ -166,6 +199,9 @@ std::vector<llama_token> tokenize(const llama_vocab * vocab, const std::string &
 std::vector<float> embed(Engine & engine, const std::vector<llama_token> & tokens, uint32_t dims) {
     const auto memory = llama_get_memory(engine.context);
     if (memory) llama_memory_clear(memory, true);
+
+    // One sequence occupies the context. Batch storage is freed after the
+    // encoder/decoder returns, before output validation can throw.
     auto batch = llama_batch_init(static_cast<int32_t>(tokens.size()), 0, 1);
     batch.n_tokens = static_cast<int32_t>(tokens.size());
     for (int32_t i = 0; i < batch.n_tokens; ++i) {
@@ -179,6 +215,9 @@ std::vector<float> embed(Engine & engine, const std::vector<llama_token> & token
         ? llama_encode(engine.context, batch) : llama_decode(engine.context, batch);
     llama_batch_free(batch);
     if (status != 0) throw std::runtime_error("inference failed");
+
+    // The pooled output belongs to the context. Copy normalized components
+    // before the next input clears sequence memory and overwrites that output.
     const auto values = llama_get_embeddings_seq(engine.context, 0);
     if (!values) throw std::runtime_error("model returned no pooled embedding");
     double squared = 0;
@@ -188,6 +227,9 @@ std::vector<float> embed(Engine & engine, const std::vector<llama_token> & token
     }
     if (!(squared > 0) || !std::isfinite(squared))
         throw std::runtime_error("invalid embedding norm");
+
+    // A failed norm check returns no vector; normalization never hides an
+    // invalid model output by dividing through zero or a nonfinite value.
     std::vector<float> normalized(dims);
     for (uint32_t i = 0; i < dims; ++i)
         normalized[i] = static_cast<float>(values[i] / std::sqrt(squared));
@@ -205,10 +247,16 @@ void serve(const Bytes & request, Engine & engine, uint32_t dims) {
         if (command != 1 && command != 2) throw std::runtime_error("unknown command");
         const auto count = reader.u32();
         if (count == 0 || count > max_batch) throw std::runtime_error("invalid batch size");
+
+        // Materialize all tokenized inputs before inference. An invalid later
+        // text therefore cannot produce a partially successful wire batch.
         std::vector<std::vector<llama_token>> inputs;
         for (uint32_t i = 0; i < count; ++i)
             inputs.push_back(tokenize(llama_model_get_vocab(engine.model), reader.text()));
         reader.end();
+
+        // Build the whole response privately. Main is the only stdout writer,
+        // so the reader can interrupt without interleaving a protocol frame.
         Bytes response{static_cast<uint8_t>(command | 128)};
         u32(response, id);
         u32(response, count);
@@ -219,6 +267,8 @@ void serve(const Bytes & request, Engine & engine, uint32_t dims) {
                 continue;
             }
             for (const auto value : embed(engine, input, dims)) {
+                // memcpy preserves IEEE float bits without aliasing through a
+                // uint32_t pointer; u32 emits the network byte order.
                 uint32_t bits;
                 static_assert(sizeof(bits) == sizeof(value));
                 std::memcpy(&bits, &value, sizeof(bits));
@@ -239,6 +289,9 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "usage: spindle-helper MODEL.gguf\n");
         return 64;
     }
+
+    // Starting the reader first makes EOF and shutdown independent of model
+    // loading. Shared ownership keeps Inbox alive in the detached thread.
     auto inbox = std::make_shared<Inbox>();
     std::thread(receive, inbox).detach();
     try {
@@ -248,6 +301,9 @@ int main(int argc, char ** argv) {
         model_options.n_gpu_layers = 0;
         engine.model = llama_model_load_from_file(argv[1], model_options);
         if (!engine.model) throw std::runtime_error("model load failed");
+
+        // The initial profile is CPU-only with one bounded sequence. Merely
+        // compiling a GPU backend does not enable offload in these options.
         auto options = llama_context_default_params();
         options.n_ctx = context_limit;
         options.n_batch = context_limit;
@@ -258,6 +314,9 @@ int main(int argc, char ** argv) {
         options.embeddings = true;
         engine.context = llama_init_from_model(engine.model, options);
         if (!engine.context) throw std::runtime_error("context initialization failed");
+
+        // Publish startup only after the context can supply a supported pooled
+        // embedding shape. Dimensions describe output, not model identity.
         const auto pooling = llama_pooling_type(engine.context);
         if (pooling != LLAMA_POOLING_TYPE_MEAN && pooling != LLAMA_POOLING_TYPE_CLS &&
             pooling != LLAMA_POOLING_TYPE_LAST) throw std::runtime_error("unsupported pooling");
@@ -267,6 +326,9 @@ int main(int argc, char ** argv) {
         u32(ready, static_cast<uint32_t>(dims));
         u32(ready, context_limit);
         send(ready);
+
+        // Move queued bytes out before model work and release the mutex. The
+        // reader stays runnable throughout inference and stdout publication.
         for (;;) {
             Bytes request;
             {
@@ -278,6 +340,8 @@ int main(int argc, char ** argv) {
             serve(request, engine, static_cast<uint32_t>(dims));
         }
     } catch (const std::exception & error) {
+        // ID zero distinguishes startup failure from a correlated request
+        // error. The helper exits instead of accepting work without a model.
         failure(0, error.what());
         std::_Exit(70);
     }
